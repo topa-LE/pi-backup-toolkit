@@ -14,7 +14,6 @@ Designed for offline partition imaging, verified backups and controlled restorat
   <img src="https://img.shields.io/badge/Imaging-Partclone-orange" alt="Partclone">
   <img src="https://img.shields.io/badge/Compression-Zstandard-7765E3" alt="Zstandard">
   <img src="https://img.shields.io/badge/Integrity-SHA--256-success" alt="SHA-256">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License"></a>
 </p>
 
 [Features](#-features) ·
@@ -43,7 +42,11 @@ The project is developed as a portable Git repository. Each installation maintai
 
 ## ✨ Features
 
-<table width="837">
+<table width="837" style="width:837px;table-layout:fixed;text-align:left;">
+<colgroup>
+<col width="261" style="width:261px;">
+<col width="576" style="width:576px;">
+</colgroup>
 <tr>
 <td width="261" valign="top">
 
@@ -95,11 +98,28 @@ The project is developed as a portable Git repository. Each installation maintai
 
 The toolkit consists of three main components:
 
-| Component | Responsibility |
-|:--|:--|
-| `bin/` | Backup launcher, core management, retention and restoration |
-| `lib/raspberry-offline/` | Central backup engine and initramfs integration |
-| `config/` | Public examples and local host configurations |
+<table width="837" style="width:837px;table-layout:fixed;text-align:left;">
+<colgroup>
+<col width="261" style="width:261px;">
+<col width="576" style="width:576px;">
+</colgroup>
+<tr>
+<th width="261" align="left">Component</th>
+<th width="576" align="left">Responsibility</th>
+</tr>
+<tr>
+<td width="261" align="left">`bin/`</td>
+<td width="576" align="left">Backup launcher, core management, retention and restoration</td>
+</tr>
+<tr>
+<td width="261" align="left">`lib/raspberry-offline/`</td>
+<td width="576" align="left">Central backup engine and initramfs integration</td>
+</tr>
+<tr>
+<td width="261" align="left">`config/`</td>
+<td width="576" align="left">Public examples and local host configurations</td>
+</tr>
+</table>
 
 ### Backup workflow
 
@@ -292,14 +312,40 @@ A successful backup does not automatically prove successful restoration. Full re
 
 The toolkit uses several mechanisms to protect backup integrity:
 
-| Protection | Purpose |
-|:--|:--|
-| `BACKUP_COMPLETE` | Marks a successfully completed backup |
-| `SHA256SUMS` | Stores image checksums |
-| `.incomplete` | Identifies unfinished backup operations |
-| Zstandard verification | Checks compressed backup images |
-| UUID / PARTUUID | Validates restored partition identity |
-| Confirmation token | Protects destructive restore operations |
+<table width="837" style="width:837px;table-layout:fixed;text-align:left;">
+<colgroup>
+<col width="261" style="width:261px;">
+<col width="576" style="width:576px;">
+</colgroup>
+<tr>
+<th width="261" align="left">Protection</th>
+<th width="576" align="left">Purpose</th>
+</tr>
+<tr>
+<td width="261" align="left">`BACKUP_COMPLETE`</td>
+<td width="576" align="left">Marks a successfully completed backup</td>
+</tr>
+<tr>
+<td width="261" align="left">`SHA256SUMS`</td>
+<td width="576" align="left">Stores image checksums</td>
+</tr>
+<tr>
+<td width="261" align="left">`.incomplete`</td>
+<td width="576" align="left">Identifies unfinished backup operations</td>
+</tr>
+<tr>
+<td width="261" align="left">Zstandard verification</td>
+<td width="576" align="left">Checks compressed backup images</td>
+</tr>
+<tr>
+<td width="261" align="left">UUID / PARTUUID</td>
+<td width="576" align="left">Validates restored partition identity</td>
+</tr>
+<tr>
+<td width="261" align="left">Confirmation token</td>
+<td width="576" align="left">Protects destructive restore operations</td>
+</tr>
+</table>
 
 Incomplete backups are not treated as valid completed backups.
 
@@ -341,16 +387,48 @@ pi-backup-toolkit/
 
 ## 🧪 Validation Status
 
-| Component | Status |
-|:--|:--|
-| Offline backup implementation | Verified on laboratory ARM64 system |
-| Partclone imaging | Verified |
-| Zstandard compression | Verified |
-| SHA-256 verification | Verified |
-| NFS backup storage | Verified |
-| Completion handling | Verified |
-| Restoration implementation | Not yet fully verified |
-| Full restore and boot test | Pending |
+<table width="837" style="width:837px;table-layout:fixed;text-align:left;">
+<colgroup>
+<col width="261" style="width:261px;">
+<col width="576" style="width:576px;">
+</colgroup>
+<tr>
+<th width="261" align="left">Component</th>
+<th width="576" align="left">Status</th>
+</tr>
+<tr>
+<td width="261" align="left">Offline backup implementation</td>
+<td width="576" align="left">Verified on laboratory ARM64 system</td>
+</tr>
+<tr>
+<td width="261" align="left">Partclone imaging</td>
+<td width="576" align="left">Verified</td>
+</tr>
+<tr>
+<td width="261" align="left">Zstandard compression</td>
+<td width="576" align="left">Verified</td>
+</tr>
+<tr>
+<td width="261" align="left">SHA-256 verification</td>
+<td width="576" align="left">Verified</td>
+</tr>
+<tr>
+<td width="261" align="left">NFS backup storage</td>
+<td width="576" align="left">Verified</td>
+</tr>
+<tr>
+<td width="261" align="left">Completion handling</td>
+<td width="576" align="left">Verified</td>
+</tr>
+<tr>
+<td width="261" align="left">Restoration implementation</td>
+<td width="576" align="left">Not yet fully verified</td>
+</tr>
+<tr>
+<td width="261" align="left">Full restore and boot test</td>
+<td width="576" align="left">Pending</td>
+</tr>
+</table>
 
 Validation status is documented in `lib/raspberry-offline/PROVEN.md`.
 
@@ -364,12 +442,4 @@ Machine-specific settings, credentials and validation evidence remain outside th
 
 Contributions and improvements should preserve the backup integrity and restoration safety mechanisms.
 
-## 📜 License
-
-This project is licensed under the **MIT License**.
-
-See the complete [MIT License](LICENSE) for details.
----
-
-
-Made with ❤️ by [topa-LE](https://github.com/topa-LE)
+<p align="left">Made with ❤️ by <a href="https://github.com/topa-LE">topa-LE</a> · <a href="LICENSE">MIT License</a></p>
