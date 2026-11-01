@@ -1,0 +1,9 @@
+# Pi Backup Toolkit - Local Workstation Configuration
+#
+# This file contains machine-specific settings.
+# Copy it to toolkit.conf and adjust it for your environment.
+# Never commit toolkit.conf to Git.
+
+# SSH private key used to connect to backup targets.
+WORKSTATION_SSH_KEY=
+

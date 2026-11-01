@@ -1,0 +1,36 @@
+#!/bin/sh
+
+PREREQ=""
+
+prereqs()
+{
+    echo "$PREREQ"
+}
+
+case "${1:-}" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+LIBGCC="$(
+    ldconfig -p 2>/dev/null |
+    awk '$1 == "libgcc_s.so.1" {print $NF; exit}'
+)"
+
+if [ -z "$LIBGCC" ] || [ ! -r "$LIBGCC" ]; then
+    echo "ERROR: libgcc_s.so.1 not found." >&2
+    exit 1
+fi
+
+TARGET="${DESTDIR}${LIBGCC}"
+
+mkdir -p "$(dirname "$TARGET")"
+
+#
+# Copy the dereferenced library, not just a symbolic link
+# without its actual target in the initramfs.
+#
+cp -L "$LIBGCC" "$TARGET"
+chmod 0644 "$TARGET"

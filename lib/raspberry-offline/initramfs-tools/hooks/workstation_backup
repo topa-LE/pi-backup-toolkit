@@ -1,0 +1,102 @@
+#!/bin/sh
+
+PREREQ=""
+
+prereqs()
+{
+    echo "$PREREQ"
+}
+
+case "${1:-}" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+add_exec()
+{
+    CMD="$1"
+    PATHNAME="$(command -v "$CMD" 2>/dev/null || true)"
+
+    if [ -z "$PATHNAME" ] || [ ! -x "$PATHNAME" ]; then
+        echo "workstation_backup: required executable missing: $CMD" >&2
+        exit 1
+    fi
+
+    copy_exec "$PATHNAME" "$(dirname "$PATHNAME")"
+}
+
+copy_config()
+{
+    SRC="$1"
+
+    if [ -r "$SRC" ]; then
+        mkdir -p "${DESTDIR}$(dirname "$SRC")"
+        cp -a "$SRC" "${DESTDIR}${SRC}"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Backup tools
+# ---------------------------------------------------------------------------
+
+add_exec partclone.ext4
+add_exec partclone.vfat
+add_exec zstd
+add_exec sfdisk
+add_exec blkid
+add_exec sha256sum
+
+# ---------------------------------------------------------------------------
+# NFSv4 Client
+# ---------------------------------------------------------------------------
+
+add_exec mount.nfs
+
+# libtirpc / RPC / NFS runtime data
+copy_config /etc/netconfig
+copy_config /etc/protocols
+
+# Optional NFS configuration
+copy_config /etc/nfs.conf
+copy_config /etc/idmapd.conf
+
+# ---------------------------------------------------------------------------
+# Workstation Toolkit
+# ---------------------------------------------------------------------------
+
+mkdir -p \
+    "${DESTDIR}/etc/workstation-backup" \
+    "${DESTDIR}/usr/lib/workstation-backup"
+
+if [ ! -r /opt/workstation-backup/host.conf ]; then
+    echo "workstation_backup: host.conf missing" >&2
+    exit 1
+fi
+
+if [ ! -r /opt/workstation-backup/backup-engine.sh ]; then
+    echo "workstation_backup: backup-engine.sh missing" >&2
+    exit 1
+fi
+
+cp -a \
+    /opt/workstation-backup/host.conf \
+    "${DESTDIR}/etc/workstation-backup/host.conf"
+
+cp -a \
+    /opt/workstation-backup/backup-engine.sh \
+    "${DESTDIR}/usr/lib/workstation-backup/backup-engine.sh"
+
+chmod 0755 \
+    "${DESTDIR}/usr/lib/workstation-backup/backup-engine.sh"
+
+cat > "${DESTDIR}/etc/workstation-backup/image-stage" <<'STAGE'
+WORKSTATION_BACKUP_IMAGE=1
+STAGE=nfs-runtime-complete
+STAGE_DESCRIPTION=Backup engine hardened; NFSv4 runtime configuration complete
+STAGE
+
+exit 0

@@ -1,0 +1,1052 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+BASE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+METHOD_DIR="${BASE}/lib/raspberry-offline"
+CFGDIR="${BASE}/config/hosts"
+
+LOCAL_CONFIG="${BASE}/config/local/toolkit.conf"
+
+if [ -r "$LOCAL_CONFIG" ]; then
+    # Local machine configuration. This file is intentionally not part of Git.
+    # shellcheck disable=SC1090
+    source "$LOCAL_CONFIG"
+fi
+
+SSH_KEY="${WORKSTATION_SSH_KEY:-}"
+
+if [ -z "$SSH_KEY" ]; then
+    echo "ERROR: No SSH key configured for the Workstation Toolkit."
+    echo "Set WORKSTATION_SSH_KEY or config/local/toolkit.conf."
+    exit 63
+fi
+
+usage()
+{
+    echo "Usage:"
+    echo "  backup-host --list"
+    echo "  backup-host --status <IP-address|hostname>"
+    echo "  backup-host --preview-live <IP-address|hostname>"
+    echo "  backup-host <IP-address|hostname>"
+    echo "  backup-host --dry-run <IP-address|hostname>"
+    echo
+    echo "Examples:"
+    echo "  backup-host --list"
+    echo "  backup-host --status example-linux-host"
+    echo "  backup-host --preview-live example-linux-host"
+    echo "  backup-host 192.0.2.10"
+    echo "  backup-host example-linux-host"
+    echo "  backup-host --dry-run example-linux-host"
+}
+
+list_hosts()
+{
+    printf "%-18s %-34s %-30s\n"         "IP ADDRESS"         "HOST"         "BACKUP METHOD"
+
+    printf "%-18s %-34s %-30s\n"         "-----------------"         "---------------------------------"         "-----------------------------"
+
+    local file
+
+    while IFS= read -r -d "" file; do
+        (
+            unset IP_ADDRESS HOST_NAME METHOD
+            # shellcheck disable=SC1090
+            source "$file"
+
+            printf "%-18s %-34s %-30s\n"                 "${IP_ADDRESS:-?}"                 "${HOST_NAME:-?}"                 "${METHOD:-?}"
+        )
+    done < <(
+        find "$CFGDIR"             -maxdepth 1             -type f             -name "*.conf"             -print0 |
+        sort -z
+    )
+}
+
+resolve_config()
+{
+    local selector="$1"
+    local direct="${CFGDIR}/${selector}.conf"
+    local file
+    local match=""
+    local count=0
+
+    #
+    # IP-based configuration:
+    #
+    if [ -r "$direct" ]; then
+        printf "%s\n" "$direct"
+        return 0
+    fi
+
+    #
+    # Alternatively search by IP_ADDRESS or HOST_NAME.
+    #
+    while IFS= read -r -d "" file; do
+
+        local found
+
+        found="$(
+            (
+                unset IP_ADDRESS HOST_NAME
+                # shellcheck disable=SC1090
+                source "$file"
+
+                if [ "${IP_ADDRESS:-}" = "$selector" ] ||                    [ "${HOST_NAME:-}" = "$selector" ]
+                then
+                    printf "yes"
+                fi
+            )
+        )"
+
+        if [ "$found" = "yes" ]; then
+            match="$file"
+            count=$((count + 1))
+        fi
+
+    done < <(
+        find "$CFGDIR"             -maxdepth 1             -type f             -name "*.conf"             -print0
+    )
+
+    if [ "$count" -eq 1 ]; then
+        printf "%s\n" "$match"
+        return 0
+    fi
+
+    if [ "$count" -gt 1 ]; then
+        echo "ERROR: Hostname is ambiguous: $selector" >&2
+        return 2
+    fi
+
+    echo "ERROR: Host not found in backup toolkit: $selector" >&2
+    return 1
+}
+
+human_seconds()
+{
+    local total="$1"
+
+    printf '%02d:%02d:%02d' \
+        $((total / 3600)) \
+        $(((total % 3600) / 60)) \
+        $((total % 60))
+}
+
+human_bytes()
+{
+    local bytes="${1:-0}"
+
+    numfmt \
+        --to=iec-i \
+        --suffix=B \
+        "$bytes" 2>/dev/null || echo "${bytes} B"
+}
+
+file_bytes()
+{
+    local file="$1"
+
+    if [ -f "$file" ]; then
+        stat -c '%s' "$file" 2>/dev/null || echo 0
+    else
+        echo 0
+    fi
+}
+
+partclone_percent()
+{
+    local logfile="$1"
+
+    if [ ! -f "$logfile" ]; then
+        echo ""
+        return
+    fi
+
+    grep -aoE \
+        'Completed:[[:space:]]*[0-9.]+%' \
+        "$logfile" 2>/dev/null |
+        tail -n 1 |
+        sed -E 's/.*Completed:[[:space:]]*//' || true
+}
+
+partclone_done()
+{
+    local logfile="$1"
+
+    [ -f "$logfile" ] &&
+    grep -aFq \
+        'Cloned successfully.' \
+        "$logfile"
+}
+
+phase_from_logs()
+{
+    local workdir="$1"
+    local finaldir="$2"
+
+    if [ -d "$finaldir" ] &&
+       [ -f "$finaldir/BACKUP_COMPLETE" ]; then
+        echo "Backup finalized successfully"
+        return
+    fi
+
+    local log="${workdir}/backup.log"
+
+    if [ -f "$log" ]; then
+
+        if grep -Fq \
+            'Generating SHA-256 checksums' \
+            "$log"
+        then
+            echo "SHA-256 verification in progress"
+            return
+        fi
+
+        if grep -Fq \
+            'Verifying zstd images' \
+            "$log"
+        then
+            echo "Verifying compressed images"
+            return
+        fi
+
+        if grep -Fq \
+            'Backing up root partition' \
+            "$log"
+        then
+            echo "Backing up root filesystem"
+            return
+        fi
+
+        if grep -Fq \
+            'Backing up boot partition' \
+            "$log"
+        then
+            echo "Backing up boot partition"
+            return
+        fi
+
+        if grep -Fq \
+            'Disk metadata saved' \
+            "$log"
+        then
+            echo "Preparing backup"
+            return
+        fi
+    fi
+
+    echo "Offline-Preparing backup"
+}
+
+dashboard()
+{
+    local phase="$1"
+    local elapsed="$2"
+    local workdir="$3"
+    local finaldir="$4"
+
+    local source_dir="$workdir"
+
+    if [ -d "$finaldir" ]; then
+        source_dir="$finaldir"
+    fi
+
+    local boot_file="${source_dir}/boot.partclone.zst"
+    local root_file="${source_dir}/root.partclone.zst"
+
+    local boot_log="${source_dir}/partclone-boot.log"
+    local root_log="${source_dir}/partclone-root.log"
+    local backup_log="${source_dir}/backup.log"
+
+    local boot_bytes
+    local root_bytes
+    local total_bytes
+
+    boot_bytes="$(file_bytes "$boot_file")"
+    root_bytes="$(file_bytes "$root_file")"
+    total_bytes=$((boot_bytes + root_bytes))
+
+    local boot_pct=""
+    local root_pct=""
+
+    boot_pct="$(partclone_percent "$boot_log")"
+    root_pct="$(partclone_percent "$root_log")"
+
+    local boot_done=0
+    local root_done=0
+    local zstd_done=0
+    local sha_done=0
+    local final_done=0
+
+    if partclone_done "$boot_log"; then
+        boot_done=1
+    fi
+
+    if partclone_done "$root_log"; then
+        root_done=1
+    fi
+
+    if [ -f "$backup_log" ] &&
+       grep -Fq 'zstd verification successful.' "$backup_log"
+    then
+        zstd_done=1
+    fi
+
+    if [ -f "$backup_log" ] &&
+       grep -Fq 'SHA-256 verification successful.' "$backup_log"
+    then
+        sha_done=1
+    fi
+
+    if [ -f "${finaldir}/BACKUP_COMPLETE" ]; then
+        final_done=1
+        boot_done=1
+        root_done=1
+        zstd_done=1
+        sha_done=1
+    fi
+
+    printf '\033[H\033[2J'
+
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║             WORKSTATION BACKUP TOOLKIT                  ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo
+    printf 'Host:          %s\n' "$HOST_NAME"
+    printf 'IP:            %s\n' "$IP_ADDRESS"
+    printf 'Method:       %s\n' "$METHOD"
+    printf 'NAS:           %s\n' "$NAS_SERVER"
+    printf 'Backup-ID:     %s\n' "$BACKUP_ID"
+
+    if [ "${PREVIEW_MODE:-0}" -eq 1 ]; then
+        printf 'Elapsed:      PREVIEW\n'
+    else
+        printf 'Elapsed:      %s\n' \
+            "$(human_seconds "$elapsed")"
+    fi
+
+    echo
+    echo "────────────────────────────────────────────────────────────"
+    printf 'Status:        %s\n' "$phase"
+    echo "────────────────────────────────────────────────────────────"
+    echo
+
+    if [ "$boot_done" -eq 1 ]; then
+        printf '[✓] Boot partition   %-10s' \
+            "$(human_bytes "$boot_bytes")"
+    elif [ "$boot_bytes" -gt 0 ]; then
+        printf '[▶] Boot partition   %-10s' \
+            "$(human_bytes "$boot_bytes")"
+    else
+        printf '[ ] Boot partition   waiting'
+    fi
+
+    [ -n "$boot_pct" ] && printf '  %s' "$boot_pct"
+    echo
+
+    if [ "$root_done" -eq 1 ]; then
+        printf '[✓] Root partition   %-10s' \
+            "$(human_bytes "$root_bytes")"
+    elif [ "$root_bytes" -gt 0 ]; then
+        printf '[▶] Root partition   %-10s' \
+            "$(human_bytes "$root_bytes")"
+    else
+        printf '[ ] Root partition   waiting'
+    fi
+
+    [ -n "$root_pct" ] && printf '  %s' "$root_pct"
+    echo
+
+    if [ "$zstd_done" -eq 1 ]; then
+        echo "[✓] zstd verification"
+    elif [ "$root_done" -eq 1 ]; then
+        echo "[▶] zstd verification"
+    else
+        echo "[ ] zstd verification"
+    fi
+
+    if [ "$sha_done" -eq 1 ]; then
+        echo "[✓] SHA-256 verification"
+    elif [ "$zstd_done" -eq 1 ]; then
+        echo "[▶] SHA-256 verification"
+    else
+        echo "[ ] SHA-256 verification"
+    fi
+
+    if [ "$final_done" -eq 1 ]; then
+        echo "[✓] Finalization / BACKUP_COMPLETE"
+    else
+        echo "[ ] Finalization / BACKUP_COMPLETE"
+    fi
+
+    echo
+    echo "────────────────────────────────────────────────────────────"
+    printf 'Written:   %s\n' \
+        "$(human_bytes "$total_bytes")"
+
+    if [ "$final_done" -eq 1 ]; then
+        echo "Result:      COMPLETE ✓"
+    else
+        echo "Result:      Backup running"
+    fi
+
+    echo "────────────────────────────────────────────────────────────"
+    echo
+}
+
+DRY_RUN=0
+STATUS_MODE=0
+PREVIEW_MODE=0
+
+if [ "$#" -eq 1 ] && [ "$1" = "--list" ]; then
+    list_hosts
+    exit 0
+
+elif [ "$#" -eq 2 ] && [ "$1" = "--status" ]; then
+    STATUS_MODE=1
+    SELECTOR="$2"
+
+elif [ "$#" -eq 2 ] && [ "$1" = "--preview-live" ]; then
+    PREVIEW_MODE=1
+    SELECTOR="$2"
+
+elif [ "$#" -eq 2 ] && [ "$1" = "--dry-run" ]; then
+    DRY_RUN=1
+    SELECTOR="$2"
+
+elif [ "$#" -eq 1 ]; then
+    SELECTOR="$1"
+
+else
+    usage
+    exit 64
+fi
+
+CFG="$(resolve_config "$SELECTOR")" || exit 65
+
+# shellcheck disable=SC1090
+source "$CFG"
+REMOTE_BACKUP_INITRAMFS="${REMOTE_BACKUP_INITRAMFS:-/boot/firmware/workstation-backup-initramfs8}"
+
+if [ -z "${IP_ADDRESS:-}" ] || [ -z "${HOST_NAME:-}" ]; then
+    echo "ERROR: Host configuration incomplete: $CFG"
+    exit 65
+fi
+
+if [ "$METHOD" != "raspberry-offline-partclone" ]; then
+    echo "ERROR: Method not yet supported: $METHOD"
+    exit 66
+fi
+
+if [ ! -r "$SSH_KEY" ]; then
+    echo "ERROR: SSH key not found: $SSH_KEY"
+    exit 67
+fi
+
+CENTRAL_ENGINE="${METHOD_DIR}/backup-engine.sh"
+
+if [ ! -r "$CENTRAL_ENGINE" ]; then
+    echo "ERROR: central backup engine missing."
+    exit 68
+fi
+
+NAS_DIR="${NAS_LOCAL_ROOT}/${NAS_HOST_DIR}"
+
+if [ ! -d "$NAS_DIR" ]; then
+    echo "ERROR: NAS destination unreachable:"
+    echo "$NAS_DIR"
+    exit 69
+fi
+
+SSH=(
+    ssh
+    -i "$SSH_KEY"
+    -o IdentitiesOnly=yes
+    -o BatchMode=yes
+    -o ConnectTimeout=5
+    "${SSH_USER}@${IP_ADDRESS}"
+)
+
+if [ "$PREVIEW_MODE" -eq 1 ]; then
+
+    NAS_DIR="${NAS_LOCAL_ROOT}/${NAS_HOST_DIR}"
+
+    LATEST="$(
+        find "$NAS_DIR" \
+            -maxdepth 1 \
+            -mindepth 1 \
+            -type d \
+            -name 'backup-*' \
+            ! -name '*.incomplete' \
+            -exec test -f '{}/BACKUP_COMPLETE' ';' \
+            -print |
+        sort |
+        tail -n 1
+    )"
+
+    if [ -z "$LATEST" ]; then
+        echo "ERROR: No completed backup available for preview."
+        exit 81
+    fi
+
+    NAME="$(basename "$LATEST")"
+    BACKUP_ID="${NAME#backup-}"
+
+    PHASE="$(
+        phase_from_logs \
+            "${LATEST}.incomplete" \
+            "$LATEST"
+    )"
+
+    dashboard \
+        "$PHASE" \
+        0 \
+        "${LATEST}.incomplete" \
+        "$LATEST"
+
+    echo "LIVE-ANZEIGE – PREVIEW"
+    echo
+    echo "Diese Darstellung verwendet das letzte fertige Backup."
+    echo "No backup was started."
+    echo "No reboot was performed."
+    echo "No changes were made on the NAS."
+    echo
+
+    exit 0
+fi
+
+if [ "$STATUS_MODE" -eq 1 ]; then
+
+    NAS_DIR="${NAS_LOCAL_ROOT}/${NAS_HOST_DIR}"
+
+    SSH=(
+        ssh
+        -i "$SSH_KEY"
+        -o IdentitiesOnly=yes
+        -o BatchMode=yes
+        -o ConnectTimeout=5
+        "${SSH_USER}@${IP_ADDRESS}"
+    )
+
+    echo
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║              WORKSTATION BACKUP STATUS                  ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo
+    printf 'Host:             %s\n' "$HOST_NAME"
+    printf 'IP:               %s\n' "$IP_ADDRESS"
+    printf 'Method:          %s\n' "$METHOD"
+    printf 'Systemdisk:       %s\n' "$SYSTEM_DISK"
+    printf 'NAS:              %s\n' "$NAS_SERVER"
+    printf 'Retention:        %s Backups\n' "$RETENTION"
+    echo
+
+    echo "────────────────────────────────────────────────────────────"
+    echo "QUELLSYSTEM"
+    echo "────────────────────────────────────────────────────────────"
+
+    if "${SSH[@]}" true >/dev/null 2>&1; then
+
+        echo "Status:           ONLINE"
+        echo
+
+        "${SSH[@]}" '
+            df -hP / /boot/firmware |
+            awk "
+                NR==1 {print}
+                NR>1  {print}
+            "
+        '
+
+    else
+        echo "Status:           NOT REACHABLE VIA SSH"
+    fi
+
+    echo
+    echo "────────────────────────────────────────────────────────────"
+    echo "BACKUPS AUF NAS"
+    echo "────────────────────────────────────────────────────────────"
+
+    if [ ! -d "$NAS_DIR" ]; then
+        echo "ERROR: NAS directory unreachable:"
+        echo "$NAS_DIR"
+        exit 80
+    fi
+
+    COMPLETE_COUNT="$(
+        find "$NAS_DIR" \
+            -maxdepth 1 \
+            -mindepth 1 \
+            -type d \
+            -name 'backup-*' \
+            ! -name '*.incomplete' \
+            -exec test -f '{}/BACKUP_COMPLETE' ';' \
+            -print |
+        wc -l
+    )"
+
+    INCOMPLETE_COUNT="$(
+        find "$NAS_DIR" \
+            -maxdepth 1 \
+            -mindepth 1 \
+            -type d \
+            -name 'backup-*.incomplete' |
+        wc -l
+    )"
+
+    LATEST="$(
+        find "$NAS_DIR" \
+            -maxdepth 1 \
+            -mindepth 1 \
+            -type d \
+            -name 'backup-*' \
+            ! -name '*.incomplete' \
+            -exec test -f '{}/BACKUP_COMPLETE' ';' \
+            -print |
+        sort |
+        tail -n 1
+    )"
+
+    printf 'Fertige Backups:  %s\n' "$COMPLETE_COUNT"
+    printf 'Incomplete:    %s\n' "$INCOMPLETE_COUNT"
+
+    if [ -n "$LATEST" ]; then
+
+        echo
+        echo "Letztes erfolgreiches Backup:"
+
+        BACKUP_NAME="$(basename "$LATEST")"
+        BACKUP_SIZE="$(du -sh "$LATEST" | awk '{print $1}')"
+
+        printf '  ID:             %s\n' \
+            "${BACKUP_NAME#backup-}"
+
+        printf '  Total size:    %s\n' \
+            "$BACKUP_SIZE"
+
+        if [ -f "$LATEST/boot.partclone.zst" ]; then
+            printf '  Boot-Image:     %s\n' \
+                "$(du -h "$LATEST/boot.partclone.zst" | awk '{print $1}')"
+        fi
+
+        if [ -f "$LATEST/root.partclone.zst" ]; then
+            printf '  Root-Image:     %s\n' \
+                "$(du -h "$LATEST/root.partclone.zst" | awk '{print $1}')"
+        fi
+
+        if [ -f "$LATEST/BACKUP_COMPLETE" ]; then
+            echo "  Status:         COMPLETE ✓"
+        fi
+
+        if [ -f "$LATEST/SHA256SUMS" ]; then
+            echo "  Checksums:     available ✓"
+        fi
+
+    else
+        echo
+        echo "Noch kein erfolgreiches Backup vorhanden."
+    fi
+
+    echo
+    echo "────────────────────────────────────────────────────────────"
+    echo "TOOLKIT-STATUS"
+    echo "────────────────────────────────────────────────────────────"
+
+    METHOD_CONF="${METHOD_DIR}/METHOD.conf"
+
+    if [ -r "$METHOD_CONF" ]; then
+
+        BACKUP_STATE="$(
+            grep '^REFERENCE_STATUS=' "$METHOD_CONF" |
+            cut -d= -f2- || true
+        )"
+
+        RESTORE_STATE="$(
+            grep '^RESTORE_STATUS=' "$METHOD_CONF" |
+            cut -d= -f2- || true
+        )"
+
+        printf 'Backup-Method:   %s\n' \
+            "${BACKUP_STATE:-UNBEKANNT}"
+
+        printf 'Restore:          %s\n' \
+            "${RESTORE_STATE:-UNBEKANNT}"
+    fi
+
+    echo
+
+    if [ "$COMPLETE_COUNT" -gt "$RETENTION" ]; then
+        echo "Notice: Valid backup count exceeds retention limit=$RETENTION."
+        echo "Automatic rotation is not enabled yet."
+    elif [ "$COMPLETE_COUNT" -eq "$RETENTION" ]; then
+        echo "Retention-Grenze ist erreicht."
+        echo "Automatic rotation is not enabled yet."
+    else
+        echo "Retention:"
+        echo "  ${COMPLETE_COUNT}/${RETENTION} valid backup slots occupied."
+    fi
+
+    echo
+    echo "No data was modified."
+
+    exit 0
+fi
+
+BACKUP_ID="$(date +%Y%m%d-%H%M%S)"
+
+WORKDIR="${NAS_DIR}/backup-${BACKUP_ID}.incomplete"
+FINALDIR="${NAS_DIR}/backup-${BACKUP_ID}"
+
+START_EPOCH="$(date +%s)"
+
+echo "============================================================"
+echo "WORKSTATION BACKUP TOOLKIT"
+echo "============================================================"
+echo
+echo "Host:       $HOST_NAME"
+echo "IP:         $IP_ADDRESS"
+echo "Method:    $METHOD"
+echo "Backup-ID:  $BACKUP_ID"
+echo
+echo "===== PRE-FLIGHT CHECK ====="
+
+REMOTE_ENGINE_SHA="$(
+    "${SSH[@]}" \
+        "sha256sum '$REMOTE_ENGINE' | awk '{print \$1}'"
+)"
+
+CENTRAL_ENGINE_SHA="$(
+    sha256sum "$CENTRAL_ENGINE" |
+    awk '{print $1}'
+)"
+
+if [ "$REMOTE_ENGINE_SHA" != "$CENTRAL_ENGINE_SHA" ]; then
+    echo "ERROR: Engine auf Zielhost weicht vom Toolkit ab."
+    echo "Zentral: $CENTRAL_ENGINE_SHA"
+    echo "Remote : $REMOTE_ENGINE_SHA"
+    exit 70
+fi
+
+echo "Engine:     OK"
+
+"${SSH[@]}" "
+set -e
+
+test -b '$SYSTEM_DISK'
+test -b '$BOOT_PARTITION'
+test -b '$ROOT_PARTITION'
+test -r '$REMOTE_BACKUP_CMDLINE'
+test -r '$REMOTE_BACKUP_INITRAMFS'
+
+if grep -qw workstation_backup_run=1 '$REMOTE_BACKUP_CMDLINE'; then
+    echo 'ERROR: Backup run is already armed.'
+    exit 71
+fi
+"
+
+echo "Disk: OK"
+echo "Run-Gate:    OK"
+
+echo
+echo "===== QUELLSYSTEM ====="
+
+"${SSH[@]}" "
+df -h / /boot/firmware |
+sed -n '1p;2,\$p'
+"
+
+if [ "$DRY_RUN" -eq 1 ]; then
+
+    ROOT_USED="$(
+        "${SSH[@]}" \
+            "df -B1 --output=used / | tail -n 1 | tr -d ' '"
+    )"
+
+    BOOT_USED="$(
+        "${SSH[@]}" \
+            "df -B1 --output=used /boot/firmware | tail -n 1 | tr -d ' '"
+    )"
+
+    echo
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║              BACKUP TOOLKIT – DRY RUN                   ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo
+    printf 'Host:             %s\n' "$HOST_NAME"
+    printf 'IP:               %s\n' "$IP_ADDRESS"
+    printf 'Method:          %s\n' "$METHOD"
+    printf 'Systemdisk:       %s\n' "$SYSTEM_DISK"
+    printf 'NAS:              %s\n' "$NAS_SERVER"
+    echo
+    echo "Aktuell belegte Daten:"
+    printf '  Boot:            %s\n' "$(human_bytes "$BOOT_USED")"
+    printf '  Root:            %s\n' "$(human_bytes "$ROOT_USED")"
+    echo
+    echo "────────────────────────────────────────────────────────────"
+    echo "SIMULIERTER ABLAUF"
+    echo "────────────────────────────────────────────────────────────"
+    echo
+
+    sleep 1
+    echo "[✓] Host-Konfiguration geladen"
+
+    sleep 1
+    echo "[✓] SSH connection verified"
+
+    sleep 1
+    echo "[✓] System disk detected"
+
+    sleep 1
+    echo "[✓] Backup engine matches toolkit"
+
+    sleep 1
+    echo "[✓] NAS-Ziel erreichbar"
+
+    sleep 1
+    echo "[SIM] Tryboot would now be activated"
+
+    sleep 1
+    echo "[SIM] Pi would boot into the offline initramfs"
+
+    sleep 1
+    echo "[SIM] Boot partition would be backed up using Partclone"
+
+    sleep 1
+    echo "[SIM] Root partition would be backed up using Partclone"
+
+    sleep 1
+    echo "[SIM] Data would be compressed using zstd"
+
+    sleep 1
+    echo "[SIM] SHA-256 would be verified once inside the engine"
+
+    sleep 1
+    echo "[SIM] BACKUP_COMPLETE would be written"
+
+    sleep 1
+    echo "[SIM] Pi would then reboot normally"
+
+    echo
+    echo "────────────────────────────────────────────────────────────"
+    echo
+    echo "DRY-RUN ERFOLGREICH"
+    echo
+    echo "Actions not performed:"
+    echo "  - No Tryboot activated"
+    echo "  - No reboot performed"
+    echo "  - KEIN Backup erzeugt"
+    echo "  - No changes made on the NAS"
+    echo
+    echo "To start a real backup later, only the following is required:"
+    echo
+    echo "  backup-host ${IP_ADDRESS}"
+    echo
+
+    exit 0
+fi
+
+echo
+echo "===== BACKUP SCHARF SCHALTEN ====="
+
+"${SSH[@]}" "BACKUP_ID='$BACKUP_ID' bash -s" <<'REMOTE'
+set -euo pipefail
+
+NORMAL="$(
+    tr '\n' ' ' < /boot/firmware/cmdline.txt |
+    sed 's/[[:space:]]*$//'
+)"
+
+printf '%s\n' \
+    "${NORMAL} workstation_backup=1 workstation_backup_run=1 workstation_backup_id=${BACKUP_ID}" \
+    > /boot/firmware/workstation-backup-cmdline.txt
+
+sync
+REMOTE
+
+OLD_BOOT_ID="$(
+    "${SSH[@]}" \
+        'cat /proc/sys/kernel/random/boot_id'
+)"
+
+echo "Run-Gate:    AKTIV"
+echo "Tryboot wird gestartet ..."
+echo
+
+set +e
+"${SSH[@]}" "sync; systemctl reboot --reboot-argument='0 tryboot'" \
+    >/dev/null 2>&1
+set -e
+
+OFFLINE=0
+
+for _ in $(seq 1 60); do
+
+    if ! "${SSH[@]}" true >/dev/null 2>&1; then
+        OFFLINE=1
+        break
+    fi
+
+    sleep 2
+done
+
+if [ "$OFFLINE" -ne 1 ]; then
+    echo "ERROR: Target host did not go offline."
+    exit 72
+fi
+
+RETURNED=0
+
+for _ in $(seq 1 720); do
+
+    NOW="$(date +%s)"
+    ELAPSED=$((NOW - START_EPOCH))
+
+    PHASE="$(
+        phase_from_logs             "$WORKDIR"             "$FINALDIR"
+    )"
+
+    dashboard \
+        "$PHASE" \
+        "$ELAPSED" \
+        "$WORKDIR" \
+        "$FINALDIR"
+
+    if BOOT_STATE="$(
+        "${SSH[@]}" \
+            'cat /proc/sys/kernel/random/boot_id; cat /proc/cmdline' \
+            2>/dev/null
+    )"
+    then
+        NEW_BOOT_ID="${BOOT_STATE%%$'\n'*}"
+        KERNEL_CMDLINE="${BOOT_STATE#*$'\n'}"
+
+        if [ "$NEW_BOOT_ID" != "$OLD_BOOT_ID" ]; then
+            case " $KERNEL_CMDLINE " in
+                *" workstation_backup=1 "*)
+                    # Backup Tryboot is running: do not treat this as a normal return.
+                    ;;
+                *)
+                    RETURNED=1
+                    break
+                    ;;
+            esac
+        fi
+    fi
+
+    sleep 10
+done
+
+if [ "$RETURNED" -ne 1 ]; then
+    echo
+    echo "ERROR: Target host did not return."
+    exit 73
+fi
+
+#
+# Run-Gate sofort wieder entfernen.
+#
+"${SSH[@]}" '
+set -e
+
+NORMAL="$(
+    tr "\n" " " < /boot/firmware/cmdline.txt |
+    sed "s/[[:space:]]*$//"
+)"
+
+printf "%s\n" \
+    "${NORMAL} workstation_backup=1" \
+    > /boot/firmware/workstation-backup-cmdline.txt
+
+sync
+'
+
+NOW="$(date +%s)"
+ELAPSED=$((NOW - START_EPOCH))
+
+if [ ! -d "$FINALDIR" ]; then
+
+    printf '\033[H\033[2J'
+
+    echo "============================================================"
+    echo "BACKUP FAILED"
+    echo "============================================================"
+    echo
+
+    if [ -d "$WORKDIR" ]; then
+        echo "Incomplete backup:"
+        echo "$WORKDIR"
+
+        echo
+        echo "--- backup.log ---"
+        cat "${WORKDIR}/backup.log" 2>/dev/null || true
+
+        echo
+        echo "--- partclone-root.log ---"
+        tail -n 50 \
+            "${WORKDIR}/partclone-root.log" \
+            2>/dev/null || true
+    fi
+
+    echo
+    echo "--- Kernel-Log ---"
+
+    "${SSH[@]}" '
+    dmesg --color=never 2>/dev/null |
+    grep -E "WORKSTATION_BACKUP_RUN|\[workstation-backup\]" |
+    tail -n 100 || true
+    '
+
+    exit 74
+fi
+
+if [ ! -f "${FINALDIR}/BACKUP_COMPLETE" ]; then
+    echo "ERROR: BACKUP_COMPLETE missing."
+    exit 75
+fi
+
+#
+# IMPORTANT:
+# Do not perform a second sha256sum -c verification.
+#
+# The backup engine has already fully verified the images,
+# before BACKUP_COMPLETE was written and .incomplete was renamed.
+#
+
+BOOT_BYTES="$(
+    file_bytes \
+        "${FINALDIR}/boot.partclone.zst"
+)"
+
+ROOT_BYTES="$(
+    file_bytes \
+        "${FINALDIR}/root.partclone.zst"
+)"
+
+TOTAL_BYTES=$((BOOT_BYTES + ROOT_BYTES))
+
+printf '\033[H\033[2J'
+
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║                  BACKUP ERFOLGREICH                     ║"
+echo "╚══════════════════════════════════════════════════════════╝"
+echo
+printf 'Host:          %s\n' "$HOST_NAME"
+printf 'IP:            %s\n' "$IP_ADDRESS"
+printf 'Backup-ID:     %s\n' "$BACKUP_ID"
+printf 'Dauer:         %s\n' "$(human_seconds "$ELAPSED")"
+printf 'Boot-Image:    %s\n' "$(human_bytes "$BOOT_BYTES")"
+printf 'Root-Image:    %s\n' "$(human_bytes "$ROOT_BYTES")"
+printf 'Gesamt:        %s\n' "$(human_bytes "$TOTAL_BYTES")"
+printf 'NAS:           %s\n' "$NAS_SERVER"
+echo
+echo "[✓] Offline-Backup"
+echo "[✓] Boot partition"
+echo "[✓] Root partition"
+echo "[✓] zstd verification"
+echo "[✓] SHA-256 verification by backup engine"
+echo "[✓] BACKUP_COMPLETE"
+echo "[✓] Pi wieder online"
+echo
+echo "Backup:"
+echo "$FINALDIR"
+echo
+echo "Restore status: NOT YET VERIFIED"

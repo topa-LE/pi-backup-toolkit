@@ -1,0 +1,251 @@
+#!/bin/sh
+
+PREREQ=""
+
+prereqs()
+{
+    echo "$PREREQ"
+}
+
+case "${1:-}" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+#
+# Active only during an explicit Workstation tryboot.
+#
+case " $(cat /proc/cmdline 2>/dev/null) " in
+    *" workstation_backup=1 "*)
+        ;;
+    *)
+        exit 0
+        ;;
+esac
+
+. /scripts/functions
+
+# WORKSTATION_BACKUP_RUN_GATE
+# Only the second explicit trigger may start the actual backup engine.
+case " $(cat /proc/cmdline 2>/dev/null) " in
+    *" workstation_backup_run=1 "*)
+        if [ -w /dev/kmsg ]; then
+            printf '<6>%s\n' "WORKSTATION_BACKUP_RUN: ENTERED" > /dev/kmsg
+        fi
+
+        /usr/lib/workstation-backup/backup-engine.sh run
+        RC=$?
+
+        if [ -w /dev/kmsg ]; then
+            printf '<6>%s\n' "WORKSTATION_BACKUP_RUN: RETURN_CODE=${RC}" > /dev/kmsg
+        fi
+
+        /bin/busybox sync
+        /bin/busybox sleep 3
+        /bin/busybox reboot -f
+        /bin/busybox sleep 10
+
+        exit "$RC"
+        ;;
+esac
+# WORKSTATION_BACKUP_RUN_GATE_END
+
+
+CONF="/etc/workstation-backup/host.conf"
+MARKER="WORKSTATION_BACKUP_NETPROBE"
+
+MOUNTED=0
+
+kmsg()
+{
+    if [ -w /dev/kmsg ]; then
+        printf '<6>%s\n' "$*" > /dev/kmsg
+    fi
+}
+
+cleanup_nfs()
+{
+    if [ "$MOUNTED" -eq 1 ]; then
+        /bin/busybox timeout 15 \
+            /bin/busybox umount "$BACKUP_MOUNT" \
+            >/dev/null 2>&1 || \
+        /bin/busybox umount -l "$BACKUP_MOUNT" \
+            >/dev/null 2>&1 || true
+
+        MOUNTED=0
+    fi
+}
+
+probe_fail()
+{
+    log_failure_msg "$*"
+    kmsg "${MARKER}: FAILED: $*"
+    cleanup_nfs
+
+    #
+    # Intentional exit 0:
+    # A failed probe must not prevent normal Debian boot
+    #
+    exit 0
+}
+
+trap cleanup_nfs EXIT HUP INT TERM
+
+kmsg "${MARKER}: ENTERED"
+log_begin_msg "Workstation Toolkit early network/NFS probe"
+
+if [ ! -r "$CONF" ]; then
+    probe_fail "host.conf missing"
+fi
+
+. "$CONF"
+
+: "${ROOT_DEVICE:?}"
+: "${BOOT_PARTITION:?}"
+: "${ROOT_PARTITION:?}"
+: "${NETWORK_INTERFACE:?}"
+: "${NETWORK_MODE:?}"
+: "${BACKUP_MOUNT:?}"
+: "${BACKUP_TARGET:?}"
+: "${NFS_VERSION:?}"
+
+#
+# Critical offline requirement:
+# Neither partition being backed up may be mounted at this point.
+#
+if /bin/busybox grep -q \
+    "^${BOOT_PARTITION} " /proc/mounts
+then
+    probe_fail "${BOOT_PARTITION} is already mounted"
+fi
+
+if /bin/busybox grep -q \
+    "^${ROOT_PARTITION} " /proc/mounts
+then
+    probe_fail "${ROOT_PARTITION} is already mounted"
+fi
+
+kmsg "${MARKER}: LOCAL_PARTITIONS_OFFLINE"
+
+#
+# Wait up to 15 seconds for the network interface.
+#
+WAIT=0
+
+while [ ! -e "/sys/class/net/${NETWORK_INTERFACE}" ]; do
+    WAIT=$((WAIT + 1))
+
+    if [ "$WAIT" -ge 15 ]; then
+        probe_fail "Network interface ${NETWORK_INTERFACE} not found"
+    fi
+
+    /bin/busybox sleep 1
+done
+
+kmsg "${MARKER}: INTERFACE_PRESENT ${NETWORK_INTERFACE}"
+
+#
+# DHCP.
+# ipconfig also has its own 30-second limit;
+# BusyBox timeout provides a second limit.
+#
+case "$NETWORK_MODE" in
+    dhcp)
+        if ! /bin/busybox timeout 45 \
+            /usr/bin/ipconfig \
+                -t 30 \
+                -c dhcp \
+                "$NETWORK_INTERFACE"
+        then
+            probe_fail "DHCP on ${NETWORK_INTERFACE} failed"
+        fi
+        ;;
+
+    *)
+        probe_fail "NETWORK_MODE ${NETWORK_MODE} not supported"
+        ;;
+esac
+
+kmsg "${MARKER}: DHCP_OK"
+
+#
+# NFS probe.
+#
+# IMPORTANT:
+# For this functional probe, deliberately use SOFT mounts
+# and short timeouts so that an unreachable NAS does not
+# cause the test boot to hang.
+#
+# The actual backup run remains separate from this probe.
+#
+/bin/busybox mkdir -p "$BACKUP_MOUNT"
+
+if ! /bin/busybox timeout 30 \
+    /usr/sbin/mount.nfs \
+        -n \
+        -o "rw,soft,vers=${NFS_VERSION},proto=tcp,timeo=20,retrans=2" \
+        "$BACKUP_TARGET" \
+        "$BACKUP_MOUNT"
+then
+    probe_fail "NFS-Mount failed"
+fi
+
+MOUNTED=1
+
+if ! /bin/busybox grep -q \
+    " ${BACKUP_MOUNT} " /proc/mounts
+then
+    probe_fail "NFS mount not found in /proc/mounts"
+fi
+
+kmsg "${MARKER}: NFS_MOUNT_OK"
+
+#
+# Small write/read/delete test.
+#
+TESTFILE="${BACKUP_MOUNT}/.workstation-initramfs-netprobe"
+
+if ! printf '%s\n' \
+    "Workstation Toolkit initramfs network probe" \
+    > "$TESTFILE"
+then
+    probe_fail "NFS-Schreibtest failed"
+fi
+
+/bin/busybox sync
+
+if ! /bin/busybox cat "$TESTFILE" >/dev/null; then
+    probe_fail "NFS-Lesetest failed"
+fi
+
+if ! /bin/busybox rm -f "$TESTFILE"; then
+    probe_fail "NFS test file could not be deleted"
+fi
+
+/bin/busybox sync
+
+kmsg "${MARKER}: NFS_RW_OK"
+
+#
+# Cleanly unmount NFS before normal root boot.
+#
+if ! /bin/busybox timeout 15 \
+    /bin/busybox umount "$BACKUP_MOUNT"
+then
+    probe_fail "NFS-Unmount failed"
+fi
+
+MOUNTED=0
+
+kmsg "${MARKER}: NFS_UMOUNT_OK"
+kmsg "${MARKER}: PASSED"
+
+log_success_msg "Workstation Toolkit early network/NFS probe PASSED"
+
+#
+# Still NO backup is performed.
+# Continue normal Debian boot afterward.
+#
+exit 0

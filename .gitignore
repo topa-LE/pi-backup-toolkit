@@ -1,0 +1,61 @@
+# Backup images and archives
+*.img
+*.img.gz
+*.img.zst
+*.partclone
+*.partclone.zst
+*.tar
+*.tar.gz
+*.tar.zst
+*.zip
+*.7z
+*.iso
+
+# Backup output and metadata
+*.incomplete/
+backup-20*/
+BACKUP_COMPLETE
+INCOMPLETE
+disk-header.bin
+disk.sfdisk
+disk.json
+blkid.txt
+manifest.txt
+
+# Temporary files and previous revisions
+*.bak
+*.old
+*.orig
+*.save
+*.tmp
+*.swp
+*.pre-*
+*~
+*.log
+
+# Local runtime configuration and secrets
+.env
+.env.*
+!.env.example
+config/hosts/*.conf
+!config/hosts/example.conf
+*.key
+*.pem
+id_rsa
+id_ed25519
+
+# Local runtime directories
+backups/
+logs/
+runtime/
+tmp/
+.cache/
+
+# Editor and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local workstation configuration
+config/local/toolkit.conf

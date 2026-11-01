@@ -1,0 +1,641 @@
+#!/bin/bash
+
+set -o pipefail
+
+BASE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+fail()
+{
+    echo "ERROR: $*" >&2
+    return 1
+}
+
+resolve_cfg()
+{
+    TARGET="$1"
+    FOUND=""
+
+    for CFGFILE in "$BASE"/config/hosts/*.conf
+    do
+        [ -r "$CFGFILE" ] || continue
+
+        MATCH="$(
+            (
+                source "$CFGFILE"
+
+                if [ "${IP_ADDRESS:-}" = "$TARGET" ] ||
+                   [ "${HOST_NAME:-}" = "$TARGET" ]
+                then
+                    printf '%s\n' "$CFGFILE"
+                fi
+            )
+        )"
+
+        if [ -n "$MATCH" ]; then
+            if [ -n "$FOUND" ]; then
+                fail "Host configuration is ambiguous."
+                return 1
+            fi
+
+            FOUND="$MATCH"
+        fi
+    done
+
+    [ -n "$FOUND" ] || {
+        fail "Host configuration not found: $TARGET"
+        return 1
+    }
+
+    printf '%s\n' "$FOUND"
+}
+
+load_backup()
+{
+    TARGET="$1"
+    SELECTOR="${2:-latest}"
+
+    CFG="$(resolve_cfg "$TARGET")" || return 1
+    source "$CFG"
+
+    BACKUP_ROOT="${NAS_LOCAL_ROOT}/${NAS_HOST_DIR}"
+
+    [ -d "$BACKUP_ROOT" ] || {
+        fail "Backup directory missing: $BACKUP_ROOT"
+        return 1
+    }
+
+    if [ "$SELECTOR" = "latest" ]; then
+
+        BACKUP_DIR=""
+
+        for D in "$BACKUP_ROOT"/backup-*
+        do
+            [ -d "$D" ] || continue
+
+            case "$D" in
+                *.incomplete)
+                    continue
+                    ;;
+            esac
+
+            [ -f "$D/BACKUP_COMPLETE" ] || continue
+            [ -f "$D/SHA256SUMS" ] || continue
+
+            if [ -z "$BACKUP_DIR" ] || [[ "$D" > "$BACKUP_DIR" ]]; then
+                BACKUP_DIR="$D"
+            fi
+        done
+
+        [ -n "$BACKUP_DIR" ] || {
+            fail "No valid backup found."
+            return 1
+        }
+
+    else
+
+        case "$SELECTOR" in
+            backup-*)
+                NAME="$SELECTOR"
+                ;;
+            *)
+                NAME="backup-$SELECTOR"
+                ;;
+        esac
+
+        BACKUP_DIR="$BACKUP_ROOT/$NAME"
+
+        [ -d "$BACKUP_DIR" ] || {
+            fail "Backup not found: $BACKUP_DIR"
+            return 1
+        }
+    fi
+
+    return 0
+}
+
+read_geometry()
+{
+    SFDISK="$BACKUP_DIR/disk.sfdisk"
+
+    LABEL="$(
+        sed -n \
+            's/^label:[[:space:]]*//p' \
+            "$SFDISK" |
+        sed -n '1p'
+    )"
+
+    SECTOR_SIZE="$(
+        sed -n \
+            's/^sector-size:[[:space:]]*//p' \
+            "$SFDISK" |
+        sed -n '1p'
+    )"
+
+    [ -n "$LABEL" ] || return 1
+    [ -n "$SECTOR_SIZE" ] || return 1
+
+    FIRST_START=""
+    MAX_END=0
+    PARTITION_COUNT=0
+
+    while IFS= read -r LINE
+    do
+        case "$LINE" in
+            /dev/*)
+                START="$(
+                    printf '%s\n' "$LINE" |
+                    sed -n \
+                        's/.*start=[[:space:]]*\([0-9][0-9]*\).*/\1/p'
+                )"
+
+                SIZE="$(
+                    printf '%s\n' "$LINE" |
+                    sed -n \
+                        's/.*size=[[:space:]]*\([0-9][0-9]*\).*/\1/p'
+                )"
+
+                [ -n "$START" ] || return 1
+                [ -n "$SIZE" ] || return 1
+
+                if [ -z "$FIRST_START" ]; then
+                    FIRST_START="$START"
+                fi
+
+                END=$((START + SIZE))
+
+                if [ "$END" -gt "$MAX_END" ]; then
+                    MAX_END="$END"
+                fi
+
+                PARTITION_COUNT=$((PARTITION_COUNT + 1))
+                ;;
+        esac
+    done < "$SFDISK"
+
+    [ -n "$FIRST_START" ] || return 1
+
+    HEADER_BYTES=$((FIRST_START * SECTOR_SIZE))
+    REQUIRED_BYTES=$((MAX_END * SECTOR_SIZE))
+
+    return 0
+}
+
+check_backup()
+{
+    echo "============================================================"
+    echo "RESTORE CHECK"
+    echo "============================================================"
+    echo
+
+    echo "Host:       $HOST_NAME"
+    echo "IP:         $IP_ADDRESS"
+    echo "Backup:     $BACKUP_DIR"
+    echo
+
+    echo "===== BACKUP FILES ====="
+
+    for FILE in \
+        disk-header.bin \
+        disk.sfdisk \
+        disk.json \
+        blkid.txt \
+        host.conf \
+        manifest.txt \
+        boot.partclone.zst \
+        root.partclone.zst \
+        SHA256SUMS \
+        BACKUP_COMPLETE
+    do
+        if [ -e "$BACKUP_DIR/$FILE" ]; then
+            echo "OK ✓  $FILE"
+        else
+            fail "Backup file missing: $FILE"
+            return 1
+        fi
+    done
+
+    echo
+    echo "===== SHA-256 ====="
+
+    (
+        cd "$BACKUP_DIR" || exit 1
+        sha256sum -c SHA256SUMS
+    ) || return 1
+
+    echo
+    echo "SHA-256 ✓"
+
+    echo
+    echo "===== ZSTD ====="
+
+    zstd -t \
+        "$BACKUP_DIR/boot.partclone.zst" \
+        >/dev/null || return 1
+
+    echo "Boot-Image ✓"
+
+    zstd -t \
+        "$BACKUP_DIR/root.partclone.zst" \
+        >/dev/null || return 1
+
+    echo "Root-Image ✓"
+
+    echo
+    echo "===== DISK-GEOMETRIE ====="
+
+    read_geometry || {
+        fail "disk.sfdisk could not be parsed."
+        return 1
+    }
+
+    echo "Label:              $LABEL"
+    echo "Sector size:        $SECTOR_SIZE"
+    echo "Partitions:        $PARTITION_COUNT"
+    echo "Disk-Header:        $HEADER_BYTES Bytes"
+    echo "Minimum target size:  $REQUIRED_BYTES Bytes"
+
+    if [ "$LABEL" != "dos" ]; then
+        fail "Restore version 1 currently supports DOS/MBR only."
+        return 1
+    fi
+
+    if [ "$PARTITION_COUNT" -ne 2 ]; then
+        fail "Restore version 1 requires exactly 2 partitions."
+        return 1
+    fi
+
+    ACTUAL_HEADER="$(
+        stat -c '%s' "$BACKUP_DIR/disk-header.bin"
+    )" || return 1
+
+    if [ "$ACTUAL_HEADER" -ne "$HEADER_BYTES" ]; then
+        fail "disk-header.bin has an unexpected size."
+        return 1
+    fi
+
+    echo "Disk-Header-Geometrie ✓"
+
+    if ! grep -q 'COMPLETE' "$BACKUP_DIR/BACKUP_COMPLETE"; then
+        fail "BACKUP_COMPLETE does not indicate a completed run."
+        return 1
+    fi
+
+    echo
+    echo "BACKUP IST RESTORE-BEREIT ✓"
+    echo
+    echo "Restore-Status bleibt:"
+    echo "  NOT_YET_VERIFIED"
+    echo
+    echo "Grund:"
+    echo "  Noch kein echter Restore + erfolgreicher Boot."
+
+    return 0
+}
+
+partition_path()
+{
+    DISK="$1"
+    NUMBER="$2"
+
+    case "$DISK" in
+        *[0-9])
+            printf '%sp%s\n' "$DISK" "$NUMBER"
+            ;;
+        *)
+            printf '%s%s\n' "$DISK" "$NUMBER"
+            ;;
+    esac
+}
+
+target_safety()
+{
+    TARGET_REAL="$(readlink -f "$1")"
+
+    [ -b "$TARGET_REAL" ] || {
+        fail "Target is not a block device: $TARGET_REAL"
+        return 1
+    }
+
+    TYPE="$(
+        lsblk -dn -o TYPE "$TARGET_REAL" |
+        tr -d '[:space:]'
+    )"
+
+    [ "$TYPE" = "disk" ] || {
+        fail "Target must be an entire disk."
+        return 1
+    }
+
+    if lsblk -nrpo MOUNTPOINT "$TARGET_REAL" |
+       grep -q '[^[:space:]]'
+    then
+        fail "Target device or target partition is mounted."
+        return 1
+    fi
+
+    ROOT_SOURCE="$(findmnt -no SOURCE /)"
+
+    ROOT_PARENT="$(
+        lsblk -no PKNAME "$ROOT_SOURCE" 2>/dev/null |
+        sed -n '1p' |
+        tr -d '[:space:]'
+    )"
+
+    if [ -n "$ROOT_PARENT" ]; then
+        ROOT_DISK="/dev/$ROOT_PARENT"
+    else
+        ROOT_DISK="$(readlink -f "$ROOT_SOURCE")"
+    fi
+
+    if [ "$(readlink -f "$ROOT_DISK")" = "$TARGET_REAL" ]; then
+        fail "Ziel ist die laufende Workstation-Systemplatte."
+        return 1
+    fi
+
+    TARGET_BYTES="$(
+        blockdev --getsize64 "$TARGET_REAL"
+    )" || return 1
+
+    if [ "$TARGET_BYTES" -lt "$REQUIRED_BYTES" ]; then
+        fail "Target disk is too small."
+        echo "Required: $REQUIRED_BYTES"
+        echo "Vorhanden: $TARGET_BYTES"
+        return 1
+    fi
+
+    MODEL="$(
+        lsblk -dn -o MODEL "$TARGET_REAL" |
+        sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+    )"
+
+    SERIAL="$(
+        lsblk -dn -o SERIAL "$TARGET_REAL" |
+        tr -cd 'A-Za-z0-9._-'
+    )"
+
+    [ -n "$SERIAL" ] || SERIAL="NOSERIAL"
+
+    TARGET_P1="$(partition_path "$TARGET_REAL" 1)"
+    TARGET_P2="$(partition_path "$TARGET_REAL" 2)"
+
+    CONFIRM_TOKEN="ERASE-$(basename "$TARGET_REAL")-${SERIAL}-${TARGET_BYTES}"
+
+    return 0
+}
+
+show_plan()
+{
+    echo
+    echo "============================================================"
+    echo "RESTORE PLAN – NO DESTRUCTIVE ACTION YET"
+    echo "============================================================"
+    echo
+    echo "Host:        $HOST_NAME"
+    echo "Backup:      $BACKUP_DIR"
+    echo "Zieldisk:    $TARGET_REAL"
+    echo "Modell:      ${MODEL:-unbekannt}"
+    echo "Seriennr.:   $SERIAL"
+    echo "Capacity:   $TARGET_BYTES Bytes"
+    echo "Required:    $REQUIRED_BYTES Bytes"
+    echo
+    echo "Partition 1: $TARGET_P1"
+    echo "Partition 2: $TARGET_P2"
+    echo
+    echo "The actual restore would COMPLETELY OVERWRITE THIS TARGET DISK"
+    echo "with the backup data."
+    echo
+    echo "Confirmation token:"
+    echo
+    echo "  $CONFIRM_TOKEN"
+    echo
+    echo "No data has been written yet."
+}
+
+execute_restore()
+{
+    TOKEN="$1"
+
+    if [ "$TOKEN" != "$CONFIRM_TOKEN" ]; then
+        fail "Confirmation token does not match."
+        return 1
+    fi
+
+    echo
+    echo "============================================================"
+    echo "DESTRUKTIVER RESTORE STARTET"
+    echo "============================================================"
+    echo
+    echo "Ziel:"
+    echo "  $TARGET_REAL"
+    echo
+
+    dd \
+        if="$BACKUP_DIR/disk-header.bin" \
+        of="$TARGET_REAL" \
+        bs=1M \
+        conv=fsync \
+        status=progress \
+        || return 1
+
+    sync
+
+    blockdev --rereadpt "$TARGET_REAL" 2>/dev/null || true
+    partx -u "$TARGET_REAL" 2>/dev/null || true
+    udevadm settle 2>/dev/null || true
+
+    N=0
+
+    while [ "$N" -lt 20 ]
+    do
+        if [ -b "$TARGET_P1" ] &&
+           [ -b "$TARGET_P2" ]
+        then
+            break
+        fi
+
+        sleep 1
+        N=$((N + 1))
+    done
+
+    [ -b "$TARGET_P1" ] || {
+        fail "Target partition 1 was not detected."
+        return 1
+    }
+
+    [ -b "$TARGET_P2" ] || {
+        fail "Target partition 2 was not detected."
+        return 1
+    }
+
+    echo
+    echo "===== BOOT PARTITION RESTORE ====="
+
+    if ! zstd -dc "$BACKUP_DIR/boot.partclone.zst" |
+         partclone.restore \
+            -s - \
+            -o "$TARGET_P1"
+    then
+        fail "Boot partition restore failed."
+        return 1
+    fi
+
+    echo
+    echo "===== ROOT PARTITION RESTORE ====="
+
+    if ! zstd -dc "$BACKUP_DIR/root.partclone.zst" |
+         partclone.restore \
+            -s - \
+            -o "$TARGET_P2"
+    then
+        fail "Root partition restore failed."
+        return 1
+    fi
+
+    sync
+
+    echo
+    echo "===== FILESYSTEM VERIFICATION ====="
+
+    fsck.vfat -n "$TARGET_P1" || return 1
+    e2fsck -fn "$TARGET_P2" || return 1
+
+    echo
+    echo "===== UUID / PARTUUID ====="
+
+    blkid "$TARGET_P1" "$TARGET_P2" || return 1
+
+    EXPECT_BOOT_UUID="$(
+        grep -F "${BOOT_PARTITION}:" "$BACKUP_DIR/blkid.txt" |
+        sed -n 's/.* UUID="\([^"]*\)".*/\1/p'
+    )"
+
+    EXPECT_ROOT_UUID="$(
+        grep -F "${ROOT_PARTITION}:" "$BACKUP_DIR/blkid.txt" |
+        sed -n 's/.* UUID="\([^"]*\)".*/\1/p'
+    )"
+
+    EXPECT_BOOT_PARTUUID="$(
+        grep -F "${BOOT_PARTITION}:" "$BACKUP_DIR/blkid.txt" |
+        sed -n 's/.* PARTUUID="\([^"]*\)".*/\1/p'
+    )"
+
+    EXPECT_ROOT_PARTUUID="$(
+        grep -F "${ROOT_PARTITION}:" "$BACKUP_DIR/blkid.txt" |
+        sed -n 's/.* PARTUUID="\([^"]*\)".*/\1/p'
+    )"
+
+    ACTUAL_BOOT_UUID="$(
+        blkid -s UUID -o value "$TARGET_P1"
+    )"
+
+    ACTUAL_ROOT_UUID="$(
+        blkid -s UUID -o value "$TARGET_P2"
+    )"
+
+    ACTUAL_BOOT_PARTUUID="$(
+        blkid -s PARTUUID -o value "$TARGET_P1"
+    )"
+
+    ACTUAL_ROOT_PARTUUID="$(
+        blkid -s PARTUUID -o value "$TARGET_P2"
+    )"
+
+    [ "$EXPECT_BOOT_UUID" = "$ACTUAL_BOOT_UUID" ] || {
+        fail "Boot UUID mismatch."
+        return 1
+    }
+
+    [ "$EXPECT_ROOT_UUID" = "$ACTUAL_ROOT_UUID" ] || {
+        fail "Root UUID mismatch."
+        return 1
+    }
+
+    [ "$EXPECT_BOOT_PARTUUID" = "$ACTUAL_BOOT_PARTUUID" ] || {
+        fail "Boot PARTUUID mismatch."
+        return 1
+    }
+
+    [ "$EXPECT_ROOT_PARTUUID" = "$ACTUAL_ROOT_PARTUUID" ] || {
+        fail "Root PARTUUID mismatch."
+        return 1
+    }
+
+    echo
+    echo "UUID/PARTUUID ✓"
+
+    echo
+    echo "============================================================"
+    echo "RESTORE TO DISK COMPLETED ✓"
+    echo "============================================================"
+    echo
+    echo "Aber:"
+    echo "  RESTORE_STATUS bleibt NOT_YET_VERIFIED."
+    echo
+    echo "The disk must now be physically installed in the Raspberry Pi"
+    echo "erfolgreich booten."
+    echo
+    echo "ERST DANACH -> RESTORE_VERIFIED."
+
+    return 0
+}
+
+usage()
+{
+    echo "restore-host --check <IP|Hostname> [latest|Backup-ID]"
+    echo "restore-host --plan <IP|Hostname> <Zieldisk> [latest|Backup-ID]"
+    echo "restore-host --execute <IP|Hostname> <Zieldisk> <Token> [latest|Backup-ID]"
+}
+
+MODE="${1:-}"
+
+case "$MODE" in
+
+    --check)
+
+        [ -n "${2:-}" ] || {
+            usage
+            exit 2
+        }
+
+        load_backup "$2" "${3:-latest}" || exit 1
+        check_backup
+        exit $?
+        ;;
+
+    --plan)
+
+        [ -n "${2:-}" ] &&
+        [ -n "${3:-}" ] || {
+            usage
+            exit 2
+        }
+
+        load_backup "$2" "${4:-latest}" || exit 1
+        check_backup || exit 1
+        target_safety "$3" || exit 1
+        show_plan
+        exit 0
+        ;;
+
+    --execute)
+
+        [ -n "${2:-}" ] &&
+        [ -n "${3:-}" ] &&
+        [ -n "${4:-}" ] || {
+            usage
+            exit 2
+        }
+
+        load_backup "$2" "${5:-latest}" || exit 1
+        check_backup || exit 1
+        target_safety "$3" || exit 1
+
+        execute_restore "$4"
+        exit $?
+        ;;
+
+    *)
+        usage
+        exit 2
+        ;;
+esac

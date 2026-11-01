@@ -1,0 +1,290 @@
+#!/bin/bash
+
+BASE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+resolve_cfg()
+{
+    TARGET="$1"
+    FOUND=""
+
+    for CFG in "$BASE"/config/hosts/*.conf
+    do
+        [ -r "$CFG" ] || continue
+
+        MATCH="$(
+            (
+                source "$CFG"
+
+                if [ "${IP_ADDRESS:-}" = "$TARGET" ] ||
+                   [ "${HOST_NAME:-}" = "$TARGET" ]
+                then
+                    printf '%s\n' "$CFG"
+                fi
+            )
+        )"
+
+        if [ -n "$MATCH" ]; then
+            if [ -n "$FOUND" ]; then
+                echo "ERROR: Host configuration is ambiguous." >&2
+                return 1
+            fi
+
+            FOUND="$MATCH"
+        fi
+    done
+
+    [ -n "$FOUND" ] || {
+        echo "ERROR: Host configuration not found: $TARGET" >&2
+        return 1
+    }
+
+    printf '%s\n' "$FOUND"
+}
+
+prune_dir()
+{
+    ROOT="$1"
+    LIMIT="$2"
+    MODE="${3:-live}"
+
+    if [ ! -d "$ROOT" ]; then
+        echo "ERROR: Backup directory missing:"
+        echo "  $ROOT"
+        return 1
+    fi
+
+    case "$LIMIT" in
+        ''|*[!0-9]*)
+            echo "ERROR: invalid retention limit: $LIMIT"
+            return 1
+            ;;
+    esac
+
+    if [ "$LIMIT" -lt 1 ]; then
+        echo "ERROR: Retention must be at least 1."
+        return 1
+    fi
+
+    VALID=()
+
+    for DIR in "$ROOT"/backup-*
+    do
+        [ -d "$DIR" ] || continue
+
+        NAME="$(basename "$DIR")"
+
+        case "$NAME" in
+            *.incomplete)
+                continue
+                ;;
+        esac
+
+        if ! printf '%s\n' "$NAME" |
+             grep -Eq '^backup-[0-9]{8}-[0-9]{6}$'
+        then
+            continue
+        fi
+
+        [ -f "$DIR/BACKUP_COMPLETE" ] || continue
+        [ -f "$DIR/SHA256SUMS" ] || continue
+
+        VALID+=("$DIR")
+    done
+
+    COUNT="${#VALID[@]}"
+
+    echo "Valid backups: $COUNT"
+    echo "Retention:       $LIMIT"
+
+    if [ "$COUNT" -le "$LIMIT" ]; then
+        echo "Nothing to delete ✓"
+        return 0
+    fi
+
+    REMOVE=$((COUNT - LIMIT))
+
+    echo "To delete:      $REMOVE"
+    echo
+
+    INDEX=0
+
+    while [ "$INDEX" -lt "$REMOVE" ]
+    do
+        VICTIM="${VALID[$INDEX]}"
+        NAME="$(basename "$VICTIM")"
+
+        case "$VICTIM" in
+            "$ROOT"/backup-*)
+                ;;
+            *)
+                echo "ERROR: Safety check for deletion path failed."
+                return 1
+                ;;
+        esac
+
+        if ! printf '%s\n' "$NAME" |
+             grep -Eq '^backup-[0-9]{8}-[0-9]{6}$'
+        then
+            echo "ERROR: unsafe backup name: $NAME"
+            return 1
+        fi
+
+        if [ "$MODE" = "dry-run" ]; then
+            echo "[DRY] would delete: $NAME"
+        else
+            echo "Deleting oldest backup: $NAME"
+
+            rm -rf -- "$VICTIM" || {
+                echo "ERROR: Deletion failed."
+                return 1
+            }
+
+            if [ -e "$VICTIM" ]; then
+                echo "ERROR: Backup still exists after deletion."
+                return 1
+            fi
+        fi
+
+        INDEX=$((INDEX + 1))
+    done
+
+    if [ "$MODE" != "dry-run" ]; then
+        REMAIN=0
+
+        for DIR in "$ROOT"/backup-*
+        do
+            [ -d "$DIR" ] || continue
+
+            NAME="$(basename "$DIR")"
+
+            case "$NAME" in
+                *.incomplete)
+                    continue
+                    ;;
+            esac
+
+            if printf '%s\n' "$NAME" |
+               grep -Eq '^backup-[0-9]{8}-[0-9]{6}$' &&
+               [ -f "$DIR/BACKUP_COMPLETE" ] &&
+               [ -f "$DIR/SHA256SUMS" ]
+            then
+                REMAIN=$((REMAIN + 1))
+            fi
+        done
+
+        if [ "$REMAIN" -gt "$LIMIT" ]; then
+            echo "ERROR: After retention, remaining backups: $REMAIN Backups."
+            return 1
+        fi
+
+        echo
+        echo "Retention abgeschlossen: $REMAIN/$LIMIT ✓"
+    fi
+
+    return 0
+}
+
+self_test()
+{
+    ROOT="/tmp/workstation-retention-selftest-$$"
+
+    rm -rf -- "$ROOT"
+    mkdir -p "$ROOT" || return 1
+
+    N=1
+
+    while [ "$N" -le 12 ]
+    do
+        TS="$(printf '%06d' "$N")"
+        DIR="$ROOT/backup-20260101-$TS"
+
+        mkdir "$DIR" || return 1
+        : > "$DIR/BACKUP_COMPLETE"
+        : > "$DIR/SHA256SUMS"
+
+        N=$((N + 1))
+    done
+
+    # incomplete backups must never be counted or deleted
+    mkdir "$ROOT/backup-20260101-999999.incomplete" || return 1
+    : > "$ROOT/backup-20260101-999999.incomplete/SHA256SUMS"
+
+    echo "SELF-TEST: 12 valid + 1 incomplete -> Retention 10"
+
+    prune_dir "$ROOT" 10 live || {
+        rm -rf -- "$ROOT"
+        return 1
+    }
+
+    COUNT="$(
+        find "$ROOT" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            -name 'backup-*' \
+            ! -name '*.incomplete' |
+        wc -l
+    )"
+
+    if [ "$COUNT" -ne 10 ]; then
+        echo "ERROR: Self-test expected 10, found $COUNT."
+        rm -rf -- "$ROOT"
+        return 1
+    fi
+
+    if [ ! -d "$ROOT/backup-20260101-999999.incomplete" ]; then
+        echo "ERROR: incomplete backup was deleted unexpectedly."
+        rm -rf -- "$ROOT"
+        return 1
+    fi
+
+    if [ -e "$ROOT/backup-20260101-000001" ] ||
+       [ -e "$ROOT/backup-20260101-000002" ]
+    then
+        echo "ERROR: oldest backups were not removed correctly."
+        rm -rf -- "$ROOT"
+        return 1
+    fi
+
+    rm -rf -- "$ROOT"
+
+    echo "SELF-TEST ERFOLGREICH ✓"
+    return 0
+}
+
+case "${1:-}" in
+    --self-test)
+        self_test
+        exit $?
+        ;;
+
+    --dry-run)
+        [ -n "${2:-}" ] || {
+            echo "Usage: backup-retention --dry-run <IP|hostname>"
+            exit 2
+        }
+
+        CFG="$(resolve_cfg "$2")" || exit 1
+        source "$CFG"
+
+        ROOT="${NAS_LOCAL_ROOT}/${NAS_HOST_DIR}"
+
+        prune_dir "$ROOT" "${RETENTION:-10}" dry-run
+        exit $?
+        ;;
+
+    '')
+        echo "Usage: backup-retention <IP|hostname>"
+        exit 2
+        ;;
+
+    *)
+        CFG="$(resolve_cfg "$1")" || exit 1
+        source "$CFG"
+
+        ROOT="${NAS_LOCAL_ROOT}/${NAS_HOST_DIR}"
+
+        prune_dir "$ROOT" "${RETENTION:-10}" live
+        exit $?
+        ;;
+esac

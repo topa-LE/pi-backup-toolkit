@@ -1,0 +1,18 @@
+[Unit]
+Description=Pi Backup Toolkit - Diagnostics Receiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Configure these values for your own workstation.
+User=YOUR_USERNAME
+Group=YOUR_GROUP
+
+ExecStart=/usr/bin/nc -l -s YOUR_DIAGNOSTICS_IP -p 5514
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

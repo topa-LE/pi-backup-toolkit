@@ -1,0 +1,42 @@
+#!/bin/bash
+
+BASE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CORE="$BASE/bin/backup-host-core"
+RET="$BASE/bin/backup-retention"
+
+if [ ! -x "$CORE" ]; then
+    echo "ERROR: backup-host-core is missing."
+    exit 1
+fi
+
+case "${1:-}" in
+    --list|--status|--dry-run|--preview-live|-h|--help|'')
+        exec "$CORE" "$@"
+        ;;
+esac
+
+TARGET="$1"
+
+"$CORE" "$@"
+RC=$?
+
+if [ "$RC" -ne 0 ]; then
+    echo
+    echo "Backup failed – retention will NOT be executed."
+    exit "$RC"
+fi
+
+echo
+echo "===== AUTOMATIC RETENTION ====="
+
+"$RET" "$TARGET"
+RRC=$?
+
+if [ "$RRC" -ne 0 ]; then
+    echo
+    echo "WARNING:"
+    echo "Backup completed successfully, but retention failed."
+    exit "$RRC"
+fi
+
+exit 0
