@@ -28,7 +28,9 @@ Designed for offline partition imaging, verified backups and controlled restorat
 
 ---
 
-## 📖 Overview
+<p align="center">
+  <img src="docs/assets/section-headers/overview.svg" alt="Overview" width="837">
+</p>
 
 Pi Backup Toolkit provides a centralized solution for creating and managing offline system backups of Raspberry Pi devices.
 
@@ -40,7 +42,9 @@ Backup images are compressed, checksummed and stored on a network backup destina
 
 The project is developed as a portable Git repository. Each installation maintains its own host configurations and SSH credentials outside the shared project code.
 
-## ✨ Features
+<p align="center">
+  <img src="docs/assets/section-headers/features.svg" alt="Features" width="837">
+</p>
 
 <table width="837" style="width:837px;table-layout:fixed;text-align:left;">
 <colgroup>
@@ -94,7 +98,9 @@ The project is developed as a portable Git repository. Each installation maintai
 </tr>
 </table>
 
-## 🏗️ Architecture
+<p align="center">
+  <img src="docs/assets/section-headers/architecture.svg" alt="Architecture" width="837">
+</p>
 
 The toolkit consists of three main components:
 
@@ -131,7 +137,9 @@ The toolkit consists of three main components:
        width="837">
 </p>
 
-## 📋 Requirements
+<p align="center">
+  <img src="docs/assets/section-headers/requirements.svg" alt="Requirements" width="837">
+</p>
 
 ### Workstation
 
@@ -149,7 +157,9 @@ The toolkit consists of three main components:
 - Partclone and Zstandard support in the backup environment
 - Network access to an NFS backup destination
 
-## 🚀 Installation
+<p align="center">
+  <img src="docs/assets/section-headers/installation.svg" alt="Installation" width="837">
+</p>
 
 Clone the repository:
 
@@ -168,7 +178,9 @@ The installer checks the required commands and project structure, creates the lo
 
 No personal SSH credentials or host configurations are included in the repository.
 
-## ⚙️ Configuration
+<p align="center">
+  <img src="docs/assets/section-headers/configuration.svg" alt="Configuration" width="837">
+</p>
 
 ### 1. Workstation configuration
 
@@ -221,7 +233,9 @@ lib/raspberry-offline/templates/host.conf.example
 
 It defines the storage devices, network interface, backup mount, NFS destination and backup parameters.
 
-## 💻 Usage
+<p align="center">
+  <img src="docs/assets/section-headers/usage.svg" alt="Usage" width="837">
+</p>
 
 The main entry point is `backup-host`.
 
@@ -261,7 +275,9 @@ The main entry point is `backup-host`.
 ./bin/backup-retention example-linux-host
 ```
 
-## ♻️ Restoration
+<p align="center">
+  <img src="docs/assets/section-headers/restoration.svg" alt="Restoration" width="837">
+</p>
 
 The toolkit includes a dedicated restore utility:
 
@@ -285,7 +301,9 @@ The restoration process includes:
 
 A successful backup does not automatically prove successful restoration. Full restore validation requires an actual restore and subsequent boot test.
 
-## 🔒 Backup Safety
+<p align="center">
+  <img src="docs/assets/section-headers/backup-safety.svg" alt="Backup Safety" width="837">
+</p>
 
 The toolkit uses several mechanisms to protect backup integrity:
 
@@ -326,7 +344,9 @@ The toolkit uses several mechanisms to protect backup integrity:
 
 Incomplete backups are not treated as valid completed backups.
 
-## 📁 Repository Structure
+<p align="center">
+  <img src="docs/assets/section-headers/repository-structure.svg" alt="Repository Structure" width="837">
+</p>
 
 ```text
 pi-backup-toolkit/
@@ -362,7 +382,9 @@ pi-backup-toolkit/
 └── README.md
 ```
 
-## 🧪 Validation Status
+<p align="center">
+  <img src="docs/assets/section-headers/validation-status.svg" alt="Validation Status" width="837">
+</p>
 
 <table width="837" style="width:837px;table-layout:fixed;text-align:left;">
 <colgroup>
@@ -409,7 +431,9 @@ pi-backup-toolkit/
 
 Validation status is documented in `lib/raspberry-offline/PROVEN.md`.
 
-## 🛠️ Development
+<p align="center">
+  <img src="docs/assets/section-headers/development.svg" alt="Development" width="837">
+</p>
 
 The project is maintained as a portable Git repository.
 
