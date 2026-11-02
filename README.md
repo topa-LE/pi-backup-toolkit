@@ -108,20 +108,22 @@ The toolkit consists of three main components:
 <th width="576" align="left">Responsibility</th>
 </tr>
 <tr>
-<td width="261" align="left">`bin/`</td>
+<td width="261" align="left">bin/</td>
 <td width="576" align="left">Backup launcher, core management, retention and restoration</td>
 </tr>
 <tr>
-<td width="261" align="left">`lib/raspberry-offline/`</td>
+<td width="261" align="left">lib/raspberry-offline/</td>
 <td width="576" align="left">Central backup engine and initramfs integration</td>
 </tr>
 <tr>
-<td width="261" align="left">`config/`</td>
+<td width="261" align="left">config/</td>
 <td width="576" align="left">Public examples and local host configurations</td>
 </tr>
 </table>
 
-### Backup workflow
+<p align="center">
+  <img src="docs/assets/backup-workflow-header.svg" alt="Backup workflow" width="837">
+</p>
 
 <p align="center">
   <img src="docs/assets/backup-workflow.svg"
@@ -297,15 +299,15 @@ The toolkit uses several mechanisms to protect backup integrity:
 <th width="576" align="left">Purpose</th>
 </tr>
 <tr>
-<td width="261" align="left">`BACKUP_COMPLETE`</td>
+<td width="261" align="left">BACKUP_COMPLETE</td>
 <td width="576" align="left">Marks a successfully completed backup</td>
 </tr>
 <tr>
-<td width="261" align="left">`SHA256SUMS`</td>
+<td width="261" align="left">SHA256SUMS</td>
 <td width="576" align="left">Stores image checksums</td>
 </tr>
 <tr>
-<td width="261" align="left">`.incomplete`</td>
+<td width="261" align="left">.incomplete</td>
 <td width="576" align="left">Identifies unfinished backup operations</td>
 </tr>
 <tr>
