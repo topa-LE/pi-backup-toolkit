@@ -123,36 +123,11 @@ The toolkit consists of three main components:
 
 ### Backup workflow
 
-```text
-        Raspberry Pi
-             │
-             ▼
-      Tryboot / Initramfs
-             │
-             ▼
-     Offline Backup Engine
-             │
-       ┌─────┴─────┐
-       ▼           ▼
-  Boot Partition  Root Partition
-       │           │
-       ▼           ▼
-    Partclone    Partclone
-       │           │
-       └─────┬─────┘
-             ▼
-       Zstandard
-       Compression
-             │
-             ▼
-       SHA-256 Checks
-             │
-             ▼
-       NFS Backup Storage
-             │
-             ▼
-      BACKUP_COMPLETE
-```
+<p align="center">
+  <img src="docs/assets/backup-workflow.svg"
+       alt="Raspberry Pi offline backup workflow"
+       width="837">
+</p>
 
 ## 📋 Requirements
 

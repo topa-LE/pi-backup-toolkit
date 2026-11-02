@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="837" height="310"
+     viewBox="0 0 837 310"
+     role="img"
+     aria-labelledby="title description">
+
+  <title id="title">Raspberry Pi Backup Workflow</title>
+  <desc id="description">
+    Raspberry Pi starts a dedicated Tryboot initramfs.
+    The offline backup engine images the boot and root partitions
+    using Partclone, compresses the data using Zstandard,
+    verifies checksums and saves the backup to NFS storage.
+    After completion, the Raspberry Pi returns to normal boot.
+  </desc>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10"
+            refX="9" refY="5"
+            markerWidth="6" markerHeight="6"
+            orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#8daec8"/>
+    </marker>
+
+    <style>
+      .background { fill: #19242e; }
+      .card { fill: #263a4a; stroke: #6b879c; stroke-width: 1.5; }
+      .heading {
+        fill: #e8f2fa;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 16px;
+        font-weight: 600;
+        text-anchor: middle;
+      }
+      .subheading {
+        fill: #b5c9d9;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 12px;
+        text-anchor: middle;
+      }
+      .line {
+        fill: none;
+        stroke: #8daec8;
+        stroke-width: 2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        marker-end: url(#arrow);
+      }
+      .label {
+        fill: #93b7d0;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 12px;
+        text-anchor: middle;
+      }
+    </style>
+  </defs>
+
+  <rect class="background"
+        width="837" height="310" rx="12"/>
+
+  <!-- First row -->
+  <rect class="card" x="24" y="36" width="174" height="64" rx="9"/>
+  <text class="heading" x="111" y="61">Raspberry Pi</text>
+  <text class="subheading" x="111" y="82">Backup triggered</text>
+
+  <rect class="card" x="229" y="36" width="174" height="64" rx="9"/>
+  <text class="heading" x="316" y="61">Tryboot</text>
+  <text class="subheading" x="316" y="82">Dedicated initramfs</text>
+
+  <rect class="card" x="434" y="36" width="174" height="64" rx="9"/>
+  <text class="heading" x="521" y="61">Offline Engine</text>
+  <text class="subheading" x="521" y="82">Partclone imaging</text>
+
+  <rect class="card" x="639" y="36" width="174" height="64" rx="9"/>
+  <text class="heading" x="726" y="61">Zstandard</text>
+  <text class="subheading" x="726" y="82">Image compression</text>
+
+  <path class="line" d="M198 68 H225"/>
+  <path class="line" d="M403 68 H430"/>
+  <path class="line" d="M608 68 H635"/>
+
+  <!-- Transition to second row -->
+  <path class="line" d="M726 100 V149 H111 V193"/>
+
+  <!-- Second row -->
+  <rect class="card" x="24" y="196" width="174" height="64" rx="9"/>
+  <text class="heading" x="111" y="221">SHA-256</text>
+  <text class="subheading" x="111" y="242">Integrity verification</text>
+
+  <rect class="card" x="229" y="196" width="174" height="64" rx="9"/>
+  <text class="heading" x="316" y="221">NFS Storage</text>
+  <text class="subheading" x="316" y="242">Backup on NAS</text>
+
+  <rect class="card" x="434" y="196" width="174" height="64" rx="9"/>
+  <text class="heading" x="521" y="221">Backup Complete</text>
+  <text class="subheading" x="521" y="242">Completion marker</text>
+
+  <rect class="card" x="639" y="196" width="174" height="64" rx="9"/>
+  <text class="heading" x="726" y="221">Normal Boot</text>
+  <text class="subheading" x="726" y="242">Local status check</text>
+
+  <path class="line" d="M198 228 H225"/>
+  <path class="line" d="M403 228 H430"/>
+  <path class="line" d="M608 228 H635"/>
+
+  <text class="label" x="418" y="291">
+    Raspberry Pi Offline Backup · Partclone · Zstandard · SHA-256 · NFS
+  </text>
+
+</svg>
